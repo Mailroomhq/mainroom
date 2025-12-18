@@ -13,6 +13,7 @@ defmodule Mailroom.Application do
       {Phoenix.PubSub, name: Mailroom.PubSub},
       {Registry, keys: :unique, name: Mailroom.Queue.Registry},
       Mailroom.Queue.Supervisor,
+      Mailroom.Consumer.Supervisor,
       # Start the Finch HTTP client for sending emails
       {Finch, name: Mailroom.Finch},
       # Start a worker by calling: Mailroom.Worker.start_link(arg)
