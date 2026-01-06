@@ -80,6 +80,8 @@ defmodule Mailroom.Queue.Manager do
 
     Logger.debug("Enqueued message #{message.id} to queue #{state.queue_name}")
 
+    broadcast_queue_event(state.queue_name, :message_enqueued)
+
     {:reply, {:ok, message}, new_state}
   end
 
@@ -109,6 +111,8 @@ defmodule Mailroom.Queue.Manager do
 
         Logger.debug("Dequeued message #{message_id} from queue #{state.queue_name}")
 
+        broadcast_queue_event(state.queue_name, :message_dequeued)
+
         {:reply, updated_message, new_state}
     end
   end
@@ -125,6 +129,8 @@ defmodule Mailroom.Queue.Manager do
         new_state = update_in(state, [:stats, :acknowledged], &(&1 + 1))
 
         Logger.debug("Acknowledged message #{message_id} in queue #{state.queue_name}")
+
+        broadcast_queue_event(state.queue_name, :message_processed)
 
         {:reply, :ok, new_state}
 
@@ -151,6 +157,8 @@ defmodule Mailroom.Queue.Manager do
             "Message #{message_id} returned to pending (attempt #{updated_message.attempts})"
           )
 
+          broadcast_queue_event(state.queue_name, :message_requeued)
+
           {:reply, :ok, state}
         else
           new_state = update_in(state, [:stats, :failed], &(&1 + 1))
@@ -159,6 +167,7 @@ defmodule Mailroom.Queue.Manager do
             "Message #{message_id} permanently failed after #{updated_message.attempts} attempts"
           )
 
+          broadcast_queue_event(state.queue_name, :message_failed)
           {:reply, :ok, new_state}
         end
 
@@ -258,5 +267,13 @@ defmodule Mailroom.Queue.Manager do
 
   defp filter_by_status(messages, status) do
     Enum.filter(messages, fn message -> message.status == status end)
+  end
+
+  defp broadcast_queue_event(queue_name, event) do
+    Phoenix.PubSub.broadcast(
+      Mailroom.PubSub,
+      "queue:#{queue_name}",
+      {__MODULE__, event, queue_name}
+    )
   end
 end

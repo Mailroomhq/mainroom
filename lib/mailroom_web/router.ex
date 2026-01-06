@@ -18,6 +18,7 @@ defmodule MailroomWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    live "/queues", QueueLive.Index, :index
   end
 
   scope "/api", MailroomWeb do
