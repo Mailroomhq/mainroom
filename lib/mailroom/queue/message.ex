@@ -10,7 +10,8 @@ defmodule Mailroom.Queue.Message do
           inserted_at: DateTime.t(),
           processing_started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil,
-          timeout_ms: pos_integer()
+          timeout_ms: pos_integer(),
+          group_id: String.t() | nil
         }
 
   defstruct [
@@ -23,7 +24,8 @@ defmodule Mailroom.Queue.Message do
     :inserted_at,
     :processing_started_at,
     :completed_at,
-    :timeout_ms
+    :timeout_ms,
+    :group_id
   ]
 
   def new(queue_name, payload, opts \\ []) do
@@ -37,7 +39,8 @@ defmodule Mailroom.Queue.Message do
       timeout_ms: Keyword.get(opts, :timeout_ms, 30_000),
       inserted_at: DateTime.utc_now(),
       processing_started_at: nil,
-      completed_at: nil
+      completed_at: nil,
+      group_id: Keyword.get(opts, :group_id)
     }
   end
 

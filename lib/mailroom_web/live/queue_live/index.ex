@@ -1,6 +1,7 @@
 defmodule MailroomWeb.QueueLive.Index do
   use MailroomWeb, :live_view
   alias Mailroom.Queue.Supervisor
+  alias Mailroom.Queue.StatsAggregator
 
   @impl true
   def render(assigns) do
@@ -72,8 +73,15 @@ defmodule MailroomWeb.QueueLive.Index do
                     Delete
                   </button>
                 </div>
-                
-    <!-- Stats Grid -->
+                <!-- Send Message Button -->
+                <button
+                  phx-click="toggle_message_form"
+                  phx-value-queue-name={queue.name}
+                  class="px-3 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-50"
+                >
+                  Send Message
+                </button>
+                <!-- Stats Grid -->
                 <div class="grid grid-cols-4 gap-4 mt-4">
                   <div class="text-center">
                     <div class="text-3xl font-bold text-blue-600">{queue.stats.pending}</div>
@@ -91,6 +99,58 @@ defmodule MailroomWeb.QueueLive.Index do
                     <div class="text-3xl font-bold text-red-600">{queue.stats.failed}</div>
                     <div class="text-sm text-gray-600">Failed</div>
                   </div>
+                  <%= if @message_form_queue == queue.name do %>
+                    <div class="mt-6 pt-6 border-t border-gray-200">
+                      <h3 class="text-lg font-semibold mb-4">Send Message</h3>
+                      <form phx-submit="send_message" class="space-y-4">
+                        <div>
+                          <label class="block text-sm font-medium text-gray-700 mb-2">
+                            Payload (JSON or text)
+                          </label>
+                          <textarea
+                            name="payload"
+                            phx-change="update_message_payload"
+                            placeholder='{"example": "data"}'
+                            rows="4"
+                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            required
+                          ><%= @message_payload %></textarea>
+                        </div>
+
+                        <div>
+                          <label class="block text-sm font-medium text-gray-700 mb-2">
+                            Group ID (optional)
+                          </label>
+                          <input
+                            type="text"
+                            name="group_id"
+                            value={@message_group_id}
+                            phx-change="update_message_group_id"
+                            placeholder="user_123"
+                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          />
+                        </div>
+
+                        <input type="hidden" name="queue_name" value={queue.name} />
+                        <div class="flex gap-4">
+                          <button
+                            type="submit"
+                            class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                          >
+                            Send
+                          </button>
+                          <button
+                            type="button"
+                            phx-click="toggle_message_form"
+                            phx-value-queue-name={queue.name}
+                            class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  <% end %>
                 </div>
               </div>
             <% end %>
@@ -115,12 +175,65 @@ defmodule MailroomWeb.QueueLive.Index do
      socket
      |> assign(queues: queues)
      |> assign(show_form: false)
-     |> assign(new_queue_name: "")}
+     |> assign(new_queue_name: "")
+     |> assign(message_form_queue: nil)
+     |> assign(message_payload: "")
+     |> assign(message_group_id: "")}
   end
 
   @impl true
   def handle_event("toggle_form", _params, socket) do
     {:noreply, assign(socket, show_form: !socket.assigns.show_form)}
+  end
+
+  @impl true
+  def handle_event("toggle_message_form", %{"queue-name" => queue_name}, socket) do
+    new_queue = if socket.assigns.message_form_queue == queue_name, do: nil, else: queue_name
+
+    {:noreply,
+     socket
+     |> assign(message_form_queue: new_queue)
+     |> assign(message_payload: "")
+     |> assign(message_group_id: "")}
+  end
+
+  @impl true
+  def handle_event("update_message_payload", %{"payload" => payload}, socket) do
+    {:noreply, assign(socket, message_payload: payload)}
+  end
+
+  @impl true
+  def handle_event("update_message_group_id", %{"group_id" => group_id}, socket) do
+    {:noreply, assign(socket, message_group_id: group_id)}
+  end
+
+  @impl true
+  def handle_event("send_message", params, socket) do
+    %{"queue_name" => queue_name, "payload" => payload_string, "group_id" => group_id} = params
+
+    payload =
+      case Jason.decode(payload_string) do
+        {:ok, json} -> json
+        {:error, _} -> payload_string
+      end
+
+    publish_opts = [queue_name: queue_name, payload: payload]
+
+    publish_opts =
+      if group_id != "", do: Keyword.put(publish_opts, :group_id, group_id), else: publish_opts
+
+    case Mailroom.Producer.Client.publish(publish_opts) do
+      {:ok, _message} ->
+        {:noreply,
+         socket
+         |> assign(message_form_queue: nil)
+         |> assign(message_payload: "")
+         |> assign(message_group_id: "")
+         |> put_flash(:info, "Message sent to #{queue_name}!")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Failed to send message: #{inspect(reason)}")}
+    end
   end
 
   @impl true
@@ -134,6 +247,8 @@ defmodule MailroomWeb.QueueLive.Index do
 
     case Supervisor.start_queue(queue_name) do
       {:ok, _pid} ->
+        Mailroom.Queue.StatsAggregator.register_queue(queue_name)
+
         queues = load_queues()
 
         Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue_name}")
@@ -173,16 +288,36 @@ defmodule MailroomWeb.QueueLive.Index do
   end
 
   @impl true
+  def handle_info({_source, event, queue_or_parent}, socket)
+      when event in [:stats_updated] or is_atom(event) do
+    parent =
+      case String.split(queue_or_parent, ":", parts: 2) do
+        [parent, _] -> parent
+        [parent] -> parent
+      end
+
+    updated_queues =
+      Enum.map(socket.assigns.queues, fn queue ->
+        if queue.name == parent do
+          %{queue | stats: StatsAggregator.get_stats(parent)}
+        else
+          queue
+        end
+      end)
+
+    {:noreply, assign(socket, queues: updated_queues)}
+  end
+
   def handle_info({Mailroom.Queue.Manager, _event, _queue_name}, socket) do
     queues = load_queues()
     {:noreply, assign(socket, queues: queues)}
   end
 
   defp load_queues do
-    queue_names = Supervisor.list_queues()
+    parent_queues = StatsAggregator.list_parent_queues()
 
-    Enum.map(queue_names, fn queue_name ->
-      stats = Mailroom.Queue.Manager.stats(queue_name)
+    Enum.map(parent_queues, fn queue_name ->
+      stats = Mailroom.Queue.StatsAggregator.get_stats(queue_name)
       %{name: queue_name, stats: stats}
     end)
   end
