@@ -1,5 +1,6 @@
 defmodule Mailroom.Consumer.Manager do
   use GenServer
+  require Logger
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
@@ -10,7 +11,15 @@ defmodule Mailroom.Consumer.Manager do
   end
 
   def ensure_consumer(queue_name) do
-    GenServer.call(__MODULE__, {:ensure_consumer, queue_name})
+    GenServer.call(__MODULE__, {:ensure_consumer, queue_name}, 10_000)
+  end
+
+  def stop_consumer(queue_name) do
+    GenServer.call(__MODULE__, {:stop_consumer, queue_name})
+  end
+
+  def reset do
+    GenServer.call(__MODULE__, :reset)
   end
 
   @impl true
@@ -28,14 +37,31 @@ defmodule Mailroom.Consumer.Manager do
     if queue_name in state.active_consumers do
       {:reply, :ok, state}
     else
-      parent_queue = parent_queue_name(queue_name)
-      handler = Keyword.fetch!(state.handlers, parent_queue)
+      parent = parent_queue_name(queue_name)
 
-      spawn_consumer(queue_name, handler)
-      new_active_consumers = MapSet.put(state.active_consumers, queue_name)
+      case find_handler(parent) do
+        {:ok, handler} ->
+          spawn_consumer(queue_name, handler)
+          new_active = MapSet.put(state.active_consumers, queue_name)
+          {:reply, :ok, %{state | active_consumers: new_active}}
 
-      {:reply, :ok, %{state | active_consumers: new_active_consumers}}
+        {:error, reason} ->
+          Logger.warning("No handler found for queue #{parent}: #{reason}")
+          {:reply, {:error, reason}, state}
+      end
     end
+  end
+
+  @impl true
+  def handle_call({:stop_consumer, queue_name}, _from, state) do
+    new_active = MapSet.delete(state.active_consumers, queue_name)
+
+    {:reply, :ok, %{state | active_consumers: new_active}}
+  end
+
+  @impl true
+  def handle_call(:reset, _from, state) do
+    {:reply, :ok, %{state | active_consumers: MapSet.new()}}
   end
 
   defp parent_queue_name(queue_name) do
@@ -47,5 +73,19 @@ defmodule Mailroom.Consumer.Manager do
 
   defp spawn_consumer(queue_name, handler) do
     Mailroom.Consumer.Supervisor.start_consumer(queue_name, handler, concurrency: 1)
+  end
+
+  defp find_handler(parent_queue) do
+    module_name =
+      parent_queue
+      |> Macro.camelize()
+      |> then(&Module.concat(Mailroom.Handlers, &1))
+
+    if Code.ensure_loaded?(module_name) and
+         function_exported?(module_name, :handle, 1) do
+      {:ok, Function.capture(module_name, :handle, 1)}
+    else
+      {:error, "Module #{module_name} not found or missing handle/1 function"}
+    end
   end
 end

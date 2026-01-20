@@ -25,16 +25,32 @@ defmodule Mailroom.Consumer.Worker do
 
   @impl true
   def handle_info(:poll, state) do
-    case Manager.dequeue(state.queue_name) do
-      nil ->
-        :ok
+    case safe_dequeue(state.queue_name) do
+      {:ok, nil} ->
+        # No messages, keep polling
+        schedule_poll(state.poll_interval)
+        {:noreply, state}
 
-      message ->
+      {:ok, message} ->
+        # Got a message, process it
         process_message(message, state.handler, state.queue_name)
-    end
+        schedule_poll(state.poll_interval)
+        {:noreply, state}
 
-    schedule_poll(state.poll_interval)
-    {:noreply, state}
+      {:error, :queue_not_found} ->
+        # Queue was deleted, shut down gracefully
+        Logger.info("Queue #{state.queue_name} no longer exists, stopping worker")
+        {:stop, :normal, state}
+    end
+  end
+
+  defp safe_dequeue(queue_name) do
+    try do
+      {:ok, Manager.dequeue(queue_name)}
+    catch
+      :exit, _ ->
+        {:error, :queue_not_found}
+    end
   end
 
   defp process_message(message, handler, queue_name) do
@@ -43,20 +59,36 @@ defmodule Mailroom.Consumer.Worker do
     try do
       case handler.(message.payload) do
         :ok ->
-          Manager.ack(queue_name, message.id)
+          safe_ack(queue_name, message.id)
           Logger.debug("Message #{message.id} acknowledged")
 
         {:ok, _} ->
-          Manager.ack(queue_name, message.id)
+          safe_ack(queue_name, message.id)
           Logger.debug("Message #{message.id} acknowledged")
 
         _ ->
-          Manager.nack(queue_name, message.id)
+          safe_nack(queue_name, message.id)
       end
     rescue
       error ->
         Logger.error("Handler failed for message #{message.id}: #{inspect(error)}")
-        Manager.nack(queue_name, message.id)
+        safe_nack(queue_name, message.id)
+    end
+  end
+
+  defp safe_ack(queue_name, message_id) do
+    try do
+      Manager.ack(queue_name, message_id)
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  defp safe_nack(queue_name, message_id) do
+    try do
+      Manager.nack(queue_name, message_id)
+    catch
+      :exit, _ -> :ok
     end
   end
 

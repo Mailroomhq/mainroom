@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mailroom - Building an SQS-style Queue in Elixir</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reset.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reveal.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/theme/night.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/monokai.min.css"
+    />
+    <style>
+      .reveal h1 {
+        font-size: 2.2em;
+        text-transform: none;
+      }
+      .reveal h2 {
+        font-size: 1.5em;
+        text-transform: none;
+      }
+      .reveal h3 {
+        font-size: 1.2em;
+        text-transform: none;
+      }
+      .reveal pre {
+        width: 100%;
+        font-size: 0.45em;
+        margin: 0.5em 0;
+      }
+      .reveal code {
+        font-family: "Fira Code", monospace;
+      }
+      .reveal ul {
+        display: block;
+        font-size: 0.8em;
+      }
+      .reveal li {
+        margin-bottom: 0.3em;
+      }
+      .reveal p {
+        font-size: 0.8em;
+      }
+      .two-column {
+        display: flex;
+        gap: 1em;
+      }
+      .two-column > div {
+        flex: 1;
+      }
+      .highlight-red {
+        color: #ff6b6b;
+      }
+      .highlight-green {
+        color: #69db7c;
+      }
+      .highlight-blue {
+        color: #74c0fc;
+      }
+      .highlight-yellow {
+        color: #ffd43b;
+      }
+      .highlight-purple {
+        color: #b197fc;
+      }
+      .small {
+        font-size: 0.7em !important;
+      }
+      .tiny {
+        font-size: 0.6em !important;
+      }
+      .box {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 0.7em;
+        border-radius: 8px;
+        margin: 0.3em 0;
+      }
+      .reveal section {
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <!-- Title Slide -->
+        <section>
+          <h1>Mailroom</h1>
+          <h3>Building an SQS-style Queue in Elixir</h3>
+          <p style="margin-top: 1.5em">
+            <strong>Brandon Bachynski</strong>
+          </p>
+          <p style="margin-top: 1em">
+            <span class="highlight-purple">Calgary Elixir Meetup</span>
+          </p>
+        </section>
+
+        <!-- Why Build a Queue? -->
+        <section>
+          <h2>Why Build a Message Queue?</h2>
+          <ul>
+            <li class="fragment">Learn OTP patterns hands-on</li>
+            <li class="fragment">Understand how SQS works under the hood</li>
+            <li class="fragment">Experience the BEAM's concurrency model</li>
+          </ul>
+        </section>
+
+        <!-- What is a Message Group ID? -->
+        <section>
+          <h2>SQS Message Group IDs</h2>
+          <div class="box">
+            <p>
+              <strong>Problem:</strong> Process messages in order per user, but
+              different users in parallel?
+            </p>
+          </div>
+          <div class="two-column fragment" style="margin-top: 0.5em">
+            <div class="box">
+              <p class="highlight-red">Without Groups</p>
+              <p class="tiny">All messages compete - no order guarantee</p>
+            </div>
+            <div class="box">
+              <p class="highlight-green">With Groups</p>
+              <p class="tiny">
+                Same group = FIFO | Different groups = Parallel
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Visual Example -->
+        <section>
+          <h2>Group IDs in Action</h2>
+          <pre><code class="elixir"># Alice's messages - processed in order
+publish(queue: "orders", group_id: "alice", payload: "Order 1")
+publish(queue: "orders", group_id: "alice", payload: "Order 2")
+
+# Bob's messages - parallel with Alice!
+publish(queue: "orders", group_id: "bob", payload: "Order 1")</code></pre>
+          <p class="fragment small" style="margin-top: 0.5em">
+            <span class="highlight-yellow">Alice: 1 → 2 (ordered)</span>
+            &nbsp;|&nbsp;
+            <span class="highlight-blue">Bob: 1 → 2 (ordered)</span><br />
+            <span class="highlight-green">Alice & Bob: simultaneous!</span>
+          </p>
+        </section>
+
+        <!-- Design Decision -->
+        <section>
+          <h2>The Key Design Decision</h2>
+          <div class="two-column">
+            <div class="box">
+              <p class="highlight-red small">Option A: Complex Dequeue</p>
+              <ul class="tiny">
+                <li>Single queue per parent</li>
+                <li>Track "busy" groups</li>
+                <li>Complex locking logic</li>
+              </ul>
+            </div>
+            <div class="box">
+              <p class="highlight-green small">Option B: Sub-Queues ✓</p>
+              <ul class="tiny">
+                <li>Spawn queue per group</li>
+                <li>Simple FIFO per queue</li>
+                <li>Natural parallelism</li>
+              </ul>
+            </div>
+          </div>
+          <p class="fragment small" style="margin-top: 0.5em">
+            <span class="highlight-purple"
+              >Elixir processes are cheap - use them!</span
+            >
+          </p>
+        </section>
+
+        <!-- Architecture Overview -->
+        <section>
+          <h2>Architecture</h2>
+          <pre><code class="text">┌──────────────────────────────────────────────────────┐
+│                 Mailroom.Supervisor                  │
+├──────────────────────────────────────────────────────┤
+│  Queue.Supervisor       │  Consumer.Supervisor       │
+│    ├─ orders            │    ├─ Worker (orders)      │
+│    ├─ orders:alice ←────│────├─ Worker (orders:alice)│
+│    └─ orders:bob   ←────│────└─ Worker (orders:bob)  │
+├──────────────────────────────────────────────────────┤
+│  StatsAggregator  │  Consumer.Manager  │  Janitor    │
+├──────────────────────────────────────────────────────┤
+│              Phoenix LiveView Dashboard              │
+└──────────────────────────────────────────────────────┘</code></pre>
+        </section>
+
+        <!-- The Router -->
+        <section>
+          <h2>The Router</h2>
+          <pre><code class="elixir">def enqueue(queue_name, payload, opts) do
+  target_queue = case Keyword.get(opts, :group_id) do
+    nil      -> queue_name              # "orders"
+    group_id -> "#{queue_name}:#{group_id}"  # "orders:alice"
+  end
+
+  with {:ok, _} <- Supervisor.ensure_queue_started(target_queue) do
+    if is_new_queue do
+      StatsAggregator.register_queue(target_queue)
+      Consumer.Manager.ensure_consumer(target_queue)
+    end
+    Manager.enqueue(target_queue, payload, opts)
+  end
+end</code></pre>
+        </section>
+
+        <!-- Convention-Based Handlers -->
+        <section>
+          <h2>Convention-Based Handlers</h2>
+          <p class="small">No registration needed - just create a module!</p>
+          <pre><code class="elixir"># Queue "demo" → Mailroom.Handlers.Demo
+
+defmodule Mailroom.Handlers.Demo do
+  def handle(payload) do
+    IO.puts("Processing: #{inspect(payload)}")
+    :ok
+  end
+end</code></pre>
+          <div class="fragment box tiny">
+            <code>Module.concat(Mailroom.Handlers, Macro.camelize("demo"))</code
+            ><br />
+            → <code>Mailroom.Handlers.Demo</code>
+          </div>
+        </section>
+
+        <!-- Stats Aggregation -->
+        <section>
+          <h2>Stats Aggregation</h2>
+          <p class="small">With sub-queues, how do we show unified stats?</p>
+          <div class="two-column">
+            <div class="box tiny">
+              <p class="highlight-red">Raw Queues</p>
+              <ul>
+                <li>orders:alice - 3 pending</li>
+                <li>orders:bob - 2 pending</li>
+              </ul>
+            </div>
+            <div class="box tiny">
+              <p class="highlight-green">Aggregated</p>
+              <ul>
+                <li>orders - 5 pending</li>
+              </ul>
+            </div>
+          </div>
+          <p class="fragment tiny" style="margin-top: 0.5em">
+            <strong>StatsAggregator:</strong> Subscribes to PubSub events,
+            extracts parent from "orders:alice" → "orders"
+          </p>
+        </section>
+
+        <!-- Problems Encountered 1 -->
+        <section>
+          <h2>Problem: GenServer Timeouts</h2>
+          <div class="box">
+            <p class="small highlight-yellow">
+              Synchronous calls created bottleneck under load
+            </p>
+            <p class="tiny">→ 5 second timeouts during burst demos</p>
+          </div>
+          <div class="fragment box">
+            <p class="small highlight-green">Fix: Make it async</p>
+            <pre><code class="elixir"># Before (blocking)
+GenServer.call(__MODULE__, {:register_queue, queue_name})
+
+# After (non-blocking)
+GenServer.cast(__MODULE__, {:register_queue, queue_name})</code></pre>
+          </div>
+        </section>
+
+        <!-- Problems Encountered 2 -->
+        <section>
+          <h2>Problem: UI Flooding</h2>
+          <div class="box">
+            <p class="small highlight-yellow">
+              Every event triggered full stats reload
+            </p>
+          </div>
+          <div class="fragment box">
+            <p class="small highlight-green">Fix: Debounce with dirty flag</p>
+            <pre><code class="elixir">:timer.send_interval(250, self(), :refresh_stats)
+
+def handle_info(:refresh_stats, socket) do
+  if socket.assigns.stats_dirty do
+    {:noreply, assign(socket, queues: load_queues(), stats_dirty: false)}
+  else
+    {:noreply, socket}
+  end
+end</code></pre>
+          </div>
+        </section>
+
+        <!-- Demo Slide -->
+        <section data-background-color="#1a1a2e">
+          <h1>Live Demo</h1>
+          <p class="highlight-purple" style="font-size: 1.3em">
+            http://localhost:4000/queues
+          </p>
+          <ul class="small" style="margin-top: 1em">
+            <li><strong>Basic Processing</strong> - Messages flow through</li>
+            <li><strong>Parallel Groups</strong> - 3 groups simultaneously</li>
+            <li><strong>Burst Load</strong> - 12 messages, 4 groups</li>
+            <li><strong>FIFO Ordering</strong> - Order preserved</li>
+          </ul>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section>
+          <h2>Key Takeaways</h2>
+          <ul>
+            <li class="fragment">
+              <span class="highlight-blue">Processes are cheap</span> - Use them
+              liberally
+            </li>
+            <li class="fragment">
+              <span class="highlight-green">PubSub is powerful</span> - Great
+              for decoupling
+            </li>
+            <li class="fragment">
+              <span class="highlight-yellow">Async by default</span> - Use casts
+              unless you need results
+            </li>
+            <li class="fragment">
+              <span class="highlight-red">Let it crash</span> - But handle
+              expected failures
+            </li>
+          </ul>
+        </section>
+
+        <!-- Supervision Tree -->
+        <section>
+          <h2>The Supervision Tree</h2>
+          <pre><code class="elixir">children = [
+  {Phoenix.PubSub, name: Mailroom.PubSub},
+  {Registry, keys: :unique, name: Mailroom.Queue.Registry},
+  Mailroom.Queue.Supervisor,       # DynamicSupervisor
+  Mailroom.Queue.StatsAggregator,  # Aggregates stats
+  Mailroom.Consumer.Supervisor,    # DynamicSupervisor
+  Mailroom.Consumer.Manager,       # Auto-spawns consumers
+  Mailroom.Queue.Janitor,          # Cleans up idle queues
+  MailroomWeb.Endpoint
+]</code></pre>
+          <p class="tiny fragment">
+            Order matters! Dependencies must start first.
+          </p>
+        </section>
+
+        <!-- Questions -->
+        <section data-background-color="#1a1a2e">
+          <h1>Questions?</h1>
+          <div style="margin-top: 1.5em">
+            <img
+              src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=https://github.com/Mailroomhq/mailroom"
+              alt="GitHub Repo QR Code"
+              style="background: white; padding: 10px; border-radius: 8px"
+            />
+          </div>
+          <p style="margin-top: 0.8em">
+            <a
+              href="https://github.com/Mailroomhq/mailroom"
+              class="highlight-blue"
+              style="font-size: 0.7em"
+              >github.com/Mailroomhq/mailroom</a
+            >
+          </p>
+          <p style="margin-top: 1em">
+            <span class="highlight-purple">Thank you!</span>
+          </p>
+        </section>
+      </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reveal.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/plugin/highlight/highlight.min.js"></script>
+    <script>
+      Reveal.initialize({
+        hash: true,
+        slideNumber: true,
+        plugins: [RevealHighlight],
+        transition: "slide",
+        backgroundTransition: "fade",
+        width: 1200,
+        height: 700,
+        margin: 0.1,
+      });
+    </script>
+  </body>
+</html>

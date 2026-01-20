@@ -2,6 +2,7 @@ defmodule MailroomWeb.QueueLive.Index do
   use MailroomWeb, :live_view
   alias Mailroom.Queue.Supervisor
   alias Mailroom.Queue.StatsAggregator
+  alias Mailroom.Producer.Client, as: Producer
 
   @impl true
   def render(assigns) do
@@ -11,15 +12,79 @@ defmodule MailroomWeb.QueueLive.Index do
         <!-- Header -->
         <div class="flex justify-between items-center mb-8">
           <h1 class="text-4xl font-bold text-gray-900">Mailroom Dashboard</h1>
-          <button
-            phx-click="toggle_form"
-            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-          >
-            + New Queue
-          </button>
+          <div class="flex gap-2">
+            <button
+              phx-click="toggle_demo"
+              class={"px-4 py-2 rounded-lg " <> if(@show_demo, do: "bg-purple-700 text-white", else: "bg-purple-600 text-white hover:bg-purple-700")}
+            >
+              Demo Mode
+            </button>
+            <button
+              phx-click="toggle_form"
+              class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              + New Queue
+            </button>
+          </div>
         </div>
-        
-    <!-- Create Queue Form -->
+
+        <!-- Demo Panel -->
+        <%= if @show_demo do %>
+          <div class="bg-gradient-to-r from-purple-600 to-indigo-600 rounded-lg shadow-lg p-6 mb-6 text-white">
+            <h2 class="text-2xl font-bold mb-2">Demo Scenarios</h2>
+            <p class="text-purple-100 mb-6">Click a scenario to see the queue system in action. Watch the stats update in real-time!</p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <!-- Scenario 1: Basic Processing -->
+              <button
+                phx-click="demo_basic"
+                class="bg-white/20 hover:bg-white/30 rounded-lg p-4 text-left transition-all"
+              >
+                <div class="text-lg font-semibold mb-1">Basic Processing</div>
+                <div class="text-sm text-purple-100">Send 5 messages and watch them flow through the queue</div>
+              </button>
+
+              <!-- Scenario 2: Parallel Groups -->
+              <button
+                phx-click="demo_parallel_groups"
+                class="bg-white/20 hover:bg-white/30 rounded-lg p-4 text-left transition-all"
+              >
+                <div class="text-lg font-semibold mb-1">Parallel Groups</div>
+                <div class="text-sm text-purple-100">3 groups processing simultaneously - true parallelism!</div>
+              </button>
+
+              <!-- Scenario 3: Burst Load -->
+              <button
+                phx-click="demo_burst"
+                class="bg-white/20 hover:bg-white/30 rounded-lg p-4 text-left transition-all"
+              >
+                <div class="text-lg font-semibold mb-1">Burst Load</div>
+                <div class="text-sm text-purple-100">Send 12 messages across 4 groups, watch the queue handle the load</div>
+              </button>
+
+              <!-- Scenario 4: Group Ordering -->
+              <button
+                phx-click="demo_fifo"
+                class="bg-white/20 hover:bg-white/30 rounded-lg p-4 text-left transition-all"
+              >
+                <div class="text-lg font-semibold mb-1">FIFO Ordering</div>
+                <div class="text-sm text-purple-100">Messages in same group processed in order (check logs!)</div>
+              </button>
+            </div>
+
+            <!-- Reset Button -->
+            <div class="mt-6 pt-4 border-t border-white/20">
+              <button
+                phx-click="demo_reset"
+                class="px-4 py-2 bg-red-500 hover:bg-red-600 rounded-lg text-sm font-medium transition-all"
+              >
+                Reset Demo (Clear All Queues)
+              </button>
+            </div>
+          </div>
+        <% end %>
+
+        <!-- Create Queue Form -->
         <%= if @show_form do %>
           <div class="bg-white rounded-lg shadow p-6 mb-6">
             <h3 class="text-lg font-semibold mb-4">Create New Queue</h3>
@@ -30,8 +95,7 @@ defmodule MailroomWeb.QueueLive.Index do
                 value={@new_queue_name}
                 phx-change="update_queue_name"
                 placeholder="Enter queue name"
-                class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-bl
-    ue-500 focus:border-transparent"
+                class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 required
               />
               <button
@@ -50,108 +114,115 @@ defmodule MailroomWeb.QueueLive.Index do
             </form>
           </div>
         <% end %>
-        
-    <!-- Queue List -->
+
+        <!-- Queue List -->
         <div class="space-y-4">
           <%= if @queues == [] do %>
             <div class="text-center py-12 bg-white rounded-lg shadow">
-              <p class="text-gray-500 text-lg">No queues yet. Create your first queue!</p>
+              <div class="text-6xl mb-4">📬</div>
+              <p class="text-gray-500 text-lg">No queues yet.</p>
+              <p class="text-gray-400 mt-2">Click "Demo Mode" above to see the system in action!</p>
             </div>
           <% else %>
             <%= for queue <- @queues do %>
               <div class="bg-white rounded-lg shadow p-6">
-                <div class="flex justify-between items-center">
+                <div class="flex justify-between items-center mb-4">
                   <!-- Queue Name -->
                   <h2 class="text-2xl font-semibold text-gray-800">{queue.name}</h2>
-                  
-    <!-- Delete Button -->
-                  <button
-                    phx-click="delete_queue"
-                    phx-value-queue-name={queue.name}
-                    class="px-3 py-1 text-red-600 border border-red-600 rounded hover:bg-red-50"
-                  >
-                    Delete
-                  </button>
+
+                  <div class="flex gap-2">
+                    <!-- Send Message Button -->
+                    <button
+                      phx-click="toggle_message_form"
+                      phx-value-queue-name={queue.name}
+                      class="px-3 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-50"
+                    >
+                      Send Message
+                    </button>
+                    <!-- Delete Button -->
+                    <button
+                      phx-click="delete_queue"
+                      phx-value-queue-name={queue.name}
+                      class="px-3 py-1 text-red-600 border border-red-600 rounded hover:bg-red-50"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
-                <!-- Send Message Button -->
-                <button
-                  phx-click="toggle_message_form"
-                  phx-value-queue-name={queue.name}
-                  class="px-3 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-50"
-                >
-                  Send Message
-                </button>
+
                 <!-- Stats Grid -->
-                <div class="grid grid-cols-4 gap-4 mt-4">
-                  <div class="text-center">
+                <div class="grid grid-cols-4 gap-4">
+                  <div class="text-center p-4 bg-blue-50 rounded-lg">
                     <div class="text-3xl font-bold text-blue-600">{queue.stats.pending}</div>
                     <div class="text-sm text-gray-600">Pending</div>
                   </div>
-                  <div class="text-center">
+                  <div class="text-center p-4 bg-yellow-50 rounded-lg">
                     <div class="text-3xl font-bold text-yellow-600">{queue.stats.processing}</div>
                     <div class="text-sm text-gray-600">Processing</div>
                   </div>
-                  <div class="text-center">
+                  <div class="text-center p-4 bg-green-50 rounded-lg">
                     <div class="text-3xl font-bold text-green-600">{queue.stats.completed}</div>
                     <div class="text-sm text-gray-600">Completed</div>
                   </div>
-                  <div class="text-center">
+                  <div class="text-center p-4 bg-red-50 rounded-lg">
                     <div class="text-3xl font-bold text-red-600">{queue.stats.failed}</div>
                     <div class="text-sm text-gray-600">Failed</div>
                   </div>
-                  <%= if @message_form_queue == queue.name do %>
-                    <div class="mt-6 pt-6 border-t border-gray-200">
-                      <h3 class="text-lg font-semibold mb-4">Send Message</h3>
-                      <form phx-submit="send_message" class="space-y-4">
-                        <div>
-                          <label class="block text-sm font-medium text-gray-700 mb-2">
-                            Payload (JSON or text)
-                          </label>
-                          <textarea
-                            name="payload"
-                            phx-change="update_message_payload"
-                            placeholder='{"example": "data"}'
-                            rows="4"
-                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                            required
-                          ><%= @message_payload %></textarea>
-                        </div>
-
-                        <div>
-                          <label class="block text-sm font-medium text-gray-700 mb-2">
-                            Group ID (optional)
-                          </label>
-                          <input
-                            type="text"
-                            name="group_id"
-                            value={@message_group_id}
-                            phx-change="update_message_group_id"
-                            placeholder="user_123"
-                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                          />
-                        </div>
-
-                        <input type="hidden" name="queue_name" value={queue.name} />
-                        <div class="flex gap-4">
-                          <button
-                            type="submit"
-                            class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
-                          >
-                            Send
-                          </button>
-                          <button
-                            type="button"
-                            phx-click="toggle_message_form"
-                            phx-value-queue-name={queue.name}
-                            class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </form>
-                    </div>
-                  <% end %>
                 </div>
+
+                <!-- Send Message Form -->
+                <%= if @message_form_queue == queue.name do %>
+                  <div class="mt-6 pt-6 border-t border-gray-200">
+                    <h3 class="text-lg font-semibold mb-4">Send Message</h3>
+                    <form phx-submit="send_message" class="space-y-4">
+                      <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">
+                          Payload (JSON or text)
+                        </label>
+                        <textarea
+                          name="payload"
+                          phx-change="update_message_payload"
+                          placeholder='{"example": "data"}'
+                          rows="4"
+                          class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          required
+                        ><%= @message_payload %></textarea>
+                      </div>
+
+                      <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">
+                          Group ID (optional)
+                        </label>
+                        <input
+                          type="text"
+                          name="group_id"
+                          value={@message_group_id}
+                          phx-change="update_message_group_id"
+                          placeholder="user_123"
+                          class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+
+                      <input type="hidden" name="queue_name" value={queue.name} />
+                      <div class="flex gap-4">
+                        <button
+                          type="submit"
+                          class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                        >
+                          Send
+                        </button>
+                        <button
+                          type="button"
+                          phx-click="toggle_message_form"
+                          phx-value-queue-name={queue.name}
+                          class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                <% end %>
               </div>
             <% end %>
           <% end %>
@@ -169,17 +240,194 @@ defmodule MailroomWeb.QueueLive.Index do
       Enum.each(queues, fn queue ->
         Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue.name}")
       end)
+
+      # Start periodic refresh timer
+      :timer.send_interval(250, self(), :refresh_stats)
     end
 
     {:ok,
      socket
      |> assign(queues: queues)
      |> assign(show_form: false)
+     |> assign(show_demo: false)
      |> assign(new_queue_name: "")
      |> assign(message_form_queue: nil)
      |> assign(message_payload: "")
-     |> assign(message_group_id: "")}
+     |> assign(message_group_id: "")
+     |> assign(stats_dirty: false)}
   end
+
+  # ====================
+  # Demo Event Handlers
+  # ====================
+
+  @impl true
+  def handle_event("toggle_demo", _params, socket) do
+    {:noreply, assign(socket, show_demo: !socket.assigns.show_demo)}
+  end
+
+  @impl true
+  def handle_event("demo_basic", _params, socket) do
+    # Subscribe first
+    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+
+    # Send first message to create the queue (synchronous - queue will be ready)
+    Producer.publish(
+      queue_name: "demo",
+      payload: %{"task" => "Task #1", "process_time_ms" => 1000}
+    )
+
+    # Queue is now ready - refresh immediately
+    queues = load_queues()
+
+    # Send remaining messages in background
+    Task.start(fn ->
+      for i <- 2..5 do
+        Producer.publish(
+          queue_name: "demo",
+          payload: %{"task" => "Task ##{i}", "process_time_ms" => 1000}
+        )
+        Process.sleep(300)
+      end
+    end)
+
+    {:noreply,
+     socket
+     |> assign(queues: queues)
+     |> assign(stats_dirty: true)
+     |> put_flash(:info, "Demo: Sending 5 messages...")}
+  end
+
+  @impl true
+  def handle_event("demo_parallel_groups", _params, socket) do
+    # Subscribe first
+    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+
+    # Pre-create the queues (synchronous - queues will be ready)
+    groups = ["alice", "bob", "charlie"]
+    Enum.each(groups, fn group ->
+      Producer.publish(
+        queue_name: "demo",
+        payload: %{"task" => "Setup #{group}", "process_time_ms" => 100},
+        group_id: group
+      )
+    end)
+
+    # Queues are now ready - refresh immediately
+    queues = load_queues()
+
+    # Now send the real messages in background
+    Task.start(fn ->
+      for i <- 1..6 do
+        group = Enum.at(groups, rem(i - 1, 3))
+        Producer.publish(
+          queue_name: "demo",
+          payload: %{"task" => "#{group} - Job ##{div(i - 1, 3) + 1}", "process_time_ms" => 1500},
+          group_id: group
+        )
+        Process.sleep(200)
+      end
+    end)
+
+    {:noreply,
+     socket
+     |> assign(queues: queues)
+     |> assign(stats_dirty: true)
+     |> put_flash(:info, "Demo: 3 groups processing in parallel!")}
+  end
+
+  @impl true
+  def handle_event("demo_burst", _params, socket) do
+    # Subscribe first
+    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+
+    # Pre-create the 4 groups (synchronous - queues will be ready)
+    for i <- 1..4 do
+      Producer.publish(
+        queue_name: "demo",
+        payload: %{"task" => "Setup group #{i}", "process_time_ms" => 100},
+        group_id: "group_#{i}"
+      )
+    end
+
+    # Queues are now ready - refresh immediately
+    queues = load_queues()
+
+    # Now send the burst in background
+    Task.start(fn ->
+      for i <- 1..12 do
+        group = "group_#{rem(i - 1, 4) + 1}"
+        Producer.publish(
+          queue_name: "demo",
+          payload: %{"task" => "Burst ##{i}", "process_time_ms" => 800},
+          group_id: group
+        )
+        Process.sleep(100)
+      end
+    end)
+
+    {:noreply,
+     socket
+     |> assign(queues: queues)
+     |> assign(stats_dirty: true)
+     |> put_flash(:info, "Demo: Burst of 12 messages across 4 groups!")}
+  end
+
+  @impl true
+  def handle_event("demo_fifo", _params, socket) do
+    # Subscribe first
+    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+
+    # Pre-create the group (synchronous - queue will be ready)
+    Producer.publish(
+      queue_name: "demo",
+      payload: %{"task" => "Setup ordered group", "process_time_ms" => 100},
+      group_id: "ordered"
+    )
+
+    # Queue is now ready - refresh immediately
+    queues = load_queues()
+
+    # Send numbered messages to same group in background
+    Task.start(fn ->
+      for i <- 1..5 do
+        Producer.publish(
+          queue_name: "demo",
+          payload: %{"task" => "Message ##{i} (check logs)", "process_time_ms" => 800},
+          group_id: "ordered"
+        )
+        Process.sleep(100)
+      end
+    end)
+
+    {:noreply,
+     socket
+     |> assign(queues: queues)
+     |> assign(stats_dirty: true)
+     |> put_flash(:info, "Demo: 5 ordered messages - check logs!")}
+  end
+
+  @impl true
+  def handle_event("demo_reset", _params, socket) do
+    # Stop all queues
+    Supervisor.list_queues()
+    |> Enum.each(fn queue_name ->
+      Supervisor.stop_queue(queue_name)
+    end)
+
+    # Clear stats and consumer tracking
+    StatsAggregator.reset()
+    Mailroom.Consumer.Manager.reset()
+
+    {:noreply,
+     socket
+     |> assign(queues: [])
+     |> put_flash(:info, "Demo reset complete. All queues cleared.")}
+  end
+
+  # ====================
+  # Form Event Handlers
+  # ====================
 
   @impl true
   def handle_event("toggle_form", _params, socket) do
@@ -222,7 +470,7 @@ defmodule MailroomWeb.QueueLive.Index do
     publish_opts =
       if group_id != "", do: Keyword.put(publish_opts, :group_id, group_id), else: publish_opts
 
-    case Mailroom.Producer.Client.publish(publish_opts) do
+    case Producer.publish(publish_opts) do
       {:ok, _message} ->
         {:noreply,
          socket
@@ -287,6 +535,21 @@ defmodule MailroomWeb.QueueLive.Index do
     end
   end
 
+  # ====================
+  # PubSub Handlers
+  # ====================
+
+  # Periodic refresh - only reload if stats are dirty
+  @impl true
+  def handle_info(:refresh_stats, socket) do
+    if socket.assigns.stats_dirty do
+      queues = load_queues()
+      {:noreply, socket |> assign(queues: queues) |> assign(stats_dirty: false)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   @impl true
   def handle_info({_source, event, queue_or_parent}, socket)
       when event in [:stats_updated] or is_atom(event) do
@@ -296,22 +559,21 @@ defmodule MailroomWeb.QueueLive.Index do
         [parent] -> parent
       end
 
-    updated_queues =
-      Enum.map(socket.assigns.queues, fn queue ->
-        if queue.name == parent do
-          %{queue | stats: StatsAggregator.get_stats(parent)}
-        else
-          queue
-        end
-      end)
+    # Subscribe to this queue if we aren't already
+    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{parent}")
 
-    {:noreply, assign(socket, queues: updated_queues)}
+    # Mark stats as dirty - will be refreshed on next timer tick
+    {:noreply, assign(socket, stats_dirty: true)}
   end
 
   def handle_info({Mailroom.Queue.Manager, _event, _queue_name}, socket) do
-    queues = load_queues()
-    {:noreply, assign(socket, queues: queues)}
+    # Mark stats as dirty - will be refreshed on next timer tick
+    {:noreply, assign(socket, stats_dirty: true)}
   end
+
+  # ====================
+  # Private Functions
+  # ====================
 
   defp load_queues do
     parent_queues = StatsAggregator.list_parent_queues()

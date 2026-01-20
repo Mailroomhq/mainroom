@@ -16,6 +16,7 @@ defmodule Mailroom.Application do
       Mailroom.Queue.StatsAggregator,
       Mailroom.Consumer.Supervisor,
       Mailroom.Consumer.Manager,
+      Mailroom.Queue.Janitor,
       # Start the Finch HTTP client for sending emails
       {Finch, name: Mailroom.Finch},
       # Start a worker by calling: Mailroom.Worker.start_link(arg)

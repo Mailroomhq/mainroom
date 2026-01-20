@@ -38,6 +38,10 @@ defmodule Mailroom.Queue.Manager do
     GenServer.call(via_tuple(queue_name), {:list_messages, status})
   end
 
+  def last_activity(queue_name) do
+    GenServer.call(via_tuple(queue_name), :last_activity)
+  end
+
   defp via_tuple(queue_name) do
     {:via, Registry, {Mailroom.Queue.Registry, queue_name}}
   end
@@ -55,6 +59,7 @@ defmodule Mailroom.Queue.Manager do
       messages_table: messages_table,
       pending_table: pending_table,
       processing_table: processing_table,
+      last_activity_at: DateTime.utc_now(),
       stats: %{
         enqueued: 0,
         dequeued: 0,
@@ -81,6 +86,8 @@ defmodule Mailroom.Queue.Manager do
     Logger.debug("Enqueued message #{message.id} to queue #{state.queue_name}")
 
     broadcast_queue_event(state.queue_name, :message_enqueued)
+
+    new_state = %{new_state | last_activity_at: DateTime.utc_now()}
 
     {:reply, {:ok, message}, new_state}
   end
@@ -113,6 +120,8 @@ defmodule Mailroom.Queue.Manager do
 
         broadcast_queue_event(state.queue_name, :message_dequeued)
 
+        new_state = %{new_state | last_activity_at: DateTime.utc_now()}
+
         {:reply, updated_message, new_state}
     end
   end
@@ -131,6 +140,8 @@ defmodule Mailroom.Queue.Manager do
         Logger.debug("Acknowledged message #{message_id} in queue #{state.queue_name}")
 
         broadcast_queue_event(state.queue_name, :message_processed)
+
+        new_state = %{new_state | last_activity_at: DateTime.utc_now()}
 
         {:reply, :ok, new_state}
 
@@ -159,7 +170,9 @@ defmodule Mailroom.Queue.Manager do
 
           broadcast_queue_event(state.queue_name, :message_requeued)
 
-          {:reply, :ok, state}
+          new_state = %{state | last_activity_at: DateTime.utc_now()}
+
+          {:reply, :ok, new_state}
         else
           new_state = update_in(state, [:stats, :failed], &(&1 + 1))
 
@@ -168,6 +181,8 @@ defmodule Mailroom.Queue.Manager do
           )
 
           broadcast_queue_event(state.queue_name, :message_failed)
+
+          new_state = %{new_state | last_activity_at: DateTime.utc_now()}
           {:reply, :ok, new_state}
         end
 
@@ -245,6 +260,11 @@ defmodule Mailroom.Queue.Manager do
     end
 
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:last_activity, _from, state) do
+    {:reply, state.last_activity_at, state}
   end
 
   defp schedule_timeout_check do

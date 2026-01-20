@@ -16,7 +16,15 @@ defmodule Mailroom.Queue.StatsAggregator do
   end
 
   def register_queue(queue_name) do
-    GenServer.call(__MODULE__, {:register_queue, queue_name})
+    GenServer.cast(__MODULE__, {:register_queue, queue_name})
+  end
+
+  def unregister_queue(queue_name) do
+    GenServer.call(__MODULE__, {:unregister_queue, queue_name})
+  end
+
+  def reset do
+    GenServer.call(__MODULE__, :reset)
   end
 
   @impl true
@@ -55,9 +63,9 @@ defmodule Mailroom.Queue.StatsAggregator do
   end
 
   @impl true
-  def handle_call({:register_queue, queue_name}, _from, state) do
+  def handle_cast({:register_queue, queue_name}, state) do
     if queue_name in state.subscribed do
-      {:reply, :ok, state}
+      {:noreply, state}
     else
       Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue_name}")
 
@@ -65,8 +73,27 @@ defmodule Mailroom.Queue.StatsAggregator do
       new_stats = Map.put_new(state.stats, parent, default_stats())
       new_subscribed = MapSet.put(state.subscribed, queue_name)
 
-      {:reply, :ok, %{stats: new_stats, subscribed: new_subscribed}}
+      {:noreply, %{stats: new_stats, subscribed: new_subscribed}}
     end
+  end
+
+  @impl true
+  def handle_call({:unregister_queue, queue_name}, _from, state) do
+    new_subscribed = MapSet.delete(state.subscribed, queue_name)
+
+    Phoenix.PubSub.unsubscribe(Mailroom.PubSub, "queue:#{queue_name}")
+
+    {:reply, :ok, %{state | subscribed: new_subscribed}}
+  end
+
+  @impl true
+  def handle_call(:reset, _from, state) do
+    # Unsubscribe from all queues
+    Enum.each(state.subscribed, fn queue_name ->
+      Phoenix.PubSub.unsubscribe(Mailroom.PubSub, "queue:#{queue_name}")
+    end)
+
+    {:reply, :ok, %{stats: %{}, subscribed: MapSet.new()}}
   end
 
   @impl true
