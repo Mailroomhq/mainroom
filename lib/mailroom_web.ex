@@ -43,7 +43,7 @@ defmodule MailroomWeb do
         layouts: [html: MailroomWeb.Layouts]
 
       import Plug.Conn
-      import MailroomWeb.Gettext
+      use Gettext, backend: MailroomWeb.Gettext
 
       unquote(verified_routes())
     end
@@ -85,7 +85,7 @@ defmodule MailroomWeb do
       import Phoenix.HTML
       # Core UI components and translation
       import MailroomWeb.CoreComponents
-      import MailroomWeb.Gettext
+      use Gettext, backend: MailroomWeb.Gettext
 
       # Shortcut for generating JS commands
       alias Phoenix.LiveView.JS

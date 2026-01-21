@@ -2,8 +2,6 @@ defmodule Mailroom.Queue.Manager do
   use GenServer
   require Logger
 
-  alias Expo.Message
-  alias Expo.Message
   alias Mailroom.Queue.Message
 
   @type queue_name :: String.t()
@@ -212,6 +210,7 @@ defmodule Mailroom.Queue.Manager do
     {:reply, stats, state}
   end
 
+  @impl true
   def handle_call({:list_messages, status}, _from, state) do
     messages =
       state.messages_table
@@ -220,6 +219,11 @@ defmodule Mailroom.Queue.Manager do
       |> filter_by_status(status)
 
     {:reply, messages, state}
+  end
+
+  @impl true
+  def handle_call(:last_activity, _from, state) do
+    {:reply, state.last_activity_at, state}
   end
 
   @impl true
@@ -260,11 +264,6 @@ defmodule Mailroom.Queue.Manager do
     end
 
     {:noreply, state}
-  end
-
-  @impl true
-  def handle_call(:last_activity, _from, state) do
-    {:reply, state.last_activity_at, state}
   end
 
   defp schedule_timeout_check do

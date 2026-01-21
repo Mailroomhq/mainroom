@@ -204,12 +204,15 @@ publish(queue: "orders", group_id: "bob", payload: "Order 1")</code></pre>
         <section>
           <h2>The Router</h2>
           <pre><code class="elixir">def enqueue(queue_name, payload, opts) do
-  target_queue = case Keyword.get(opts, :group_id) do
-    nil      -> queue_name              # "orders"
-    group_id -> "#{queue_name}:#{group_id}"  # "orders:alice"
-  end
+  target_queue =
+    case Keyword.get(opts, :group_id) do
+      nil -> queue_name                    # "orders"
+      group_id -> "#{queue_name}:#{group_id}"  # "orders:alice"
+    end
 
-  with {:ok, _} <- Supervisor.ensure_queue_started(target_queue) do
+  is_new_queue = not Supervisor.queue_exists?(target_queue)
+
+  with {:ok, _pid} <- Supervisor.ensure_queue_started(target_queue, opts) do
     if is_new_queue do
       StatsAggregator.register_queue(target_queue)
       Consumer.Manager.ensure_consumer(target_queue)
@@ -226,8 +229,16 @@ end</code></pre>
           <pre><code class="elixir"># Queue "demo" → Mailroom.Handlers.Demo
 
 defmodule Mailroom.Handlers.Demo do
+  require Logger
+
   def handle(payload) do
-    IO.puts("Processing: #{inspect(payload)}")
+    process_time = Map.get(payload, "process_time_ms", 1000)
+    task_name = Map.get(payload, "task", "demo task")
+
+    Logger.info("Processing: #{task_name}")
+    Process.sleep(process_time)
+    Logger.info("Completed: #{task_name}")
+
     :ok
   end
 end</code></pre>
@@ -287,18 +298,47 @@ GenServer.cast(__MODULE__, {:register_queue, queue_name})</code></pre>
           <h2>Problem: UI Flooding</h2>
           <div class="box">
             <p class="small highlight-yellow">
-              Every event triggered full stats reload
+              Every PubSub event triggered full stats reload
             </p>
           </div>
           <div class="fragment box">
             <p class="small highlight-green">Fix: Debounce with dirty flag</p>
-            <pre><code class="elixir">:timer.send_interval(250, self(), :refresh_stats)
+            <pre><code class="elixir"># In mount/3
+:timer.send_interval(250, self(), :refresh_stats)
 
+# Mark dirty on events, don't reload immediately
+def handle_info({_source, _event, _queue}, socket) do
+  {:noreply, assign(socket, stats_dirty: true)}
+end
+
+# Only reload on timer tick if dirty
 def handle_info(:refresh_stats, socket) do
   if socket.assigns.stats_dirty do
     {:noreply, assign(socket, queues: load_queues(), stats_dirty: false)}
   else
     {:noreply, socket}
+  end
+end</code></pre>
+          </div>
+        </section>
+
+        <!-- Problems Encountered 3 -->
+        <section>
+          <h2>Problem: Duplicate PubSub Subscriptions</h2>
+          <div class="box">
+            <p class="small highlight-yellow">
+              UI slowed down exponentially with each demo run
+            </p>
+            <p class="tiny">→ Multiple demos caused cascading duplicate messages</p>
+          </div>
+          <div class="fragment box">
+            <p class="small highlight-green">Fix: Track subscriptions in socket</p>
+            <pre><code class="elixir">defp maybe_subscribe(socket, queue_name) do
+  if queue_name in socket.assigns.subscribed do
+    socket
+  else
+    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue_name}")
+    assign(socket, subscribed: MapSet.put(socket.assigns.subscribed, queue_name))
   end
 end</code></pre>
           </div>
@@ -345,17 +385,18 @@ end</code></pre>
         <section>
           <h2>The Supervision Tree</h2>
           <pre><code class="elixir">children = [
+  MailroomWeb.Telemetry,
   {Phoenix.PubSub, name: Mailroom.PubSub},
   {Registry, keys: :unique, name: Mailroom.Queue.Registry},
-  Mailroom.Queue.Supervisor,       # DynamicSupervisor
-  Mailroom.Queue.StatsAggregator,  # Aggregates stats
-  Mailroom.Consumer.Supervisor,    # DynamicSupervisor
-  Mailroom.Consumer.Manager,       # Auto-spawns consumers
-  Mailroom.Queue.Janitor,          # Cleans up idle queues
+  Mailroom.Queue.Supervisor,       # DynamicSupervisor for queues
+  Mailroom.Queue.StatsAggregator,  # Aggregates stats across sub-queues
+  Mailroom.Consumer.Supervisor,    # DynamicSupervisor for consumers
+  Mailroom.Consumer.Manager,       # Auto-spawns consumers for new queues
+  Mailroom.Queue.Janitor,          # Cleans up idle group queues
   MailroomWeb.Endpoint
 ]</code></pre>
           <p class="tiny fragment">
-            Order matters! Dependencies must start first.
+            Order matters! Registry before Supervisors, PubSub before StatsAggregator.
           </p>
         </section>
 

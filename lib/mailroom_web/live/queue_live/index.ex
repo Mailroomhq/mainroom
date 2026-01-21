@@ -236,25 +236,32 @@ defmodule MailroomWeb.QueueLive.Index do
   def mount(_params, _session, socket) do
     queues = load_queues()
 
-    if connected?(socket) do
-      Enum.each(queues, fn queue ->
-        Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue.name}")
-      end)
+    subscribed =
+      if connected?(socket) do
+        Enum.each(queues, fn queue ->
+          Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue.name}")
+        end)
 
-      # Start periodic refresh timer
-      :timer.send_interval(250, self(), :refresh_stats)
-    end
+        # Start periodic refresh timer
+        :timer.send_interval(250, self(), :refresh_stats)
+
+        queues |> Enum.map(& &1.name) |> MapSet.new()
+      else
+        MapSet.new()
+      end
 
     {:ok,
-     socket
-     |> assign(queues: queues)
-     |> assign(show_form: false)
-     |> assign(show_demo: false)
-     |> assign(new_queue_name: "")
-     |> assign(message_form_queue: nil)
-     |> assign(message_payload: "")
-     |> assign(message_group_id: "")
-     |> assign(stats_dirty: false)}
+     assign(socket,
+       queues: queues,
+       show_form: false,
+       show_demo: false,
+       new_queue_name: "",
+       message_form_queue: nil,
+       message_payload: "",
+       message_group_id: "",
+       stats_dirty: false,
+       subscribed: subscribed
+     )}
   end
 
   # ====================
@@ -263,13 +270,13 @@ defmodule MailroomWeb.QueueLive.Index do
 
   @impl true
   def handle_event("toggle_demo", _params, socket) do
-    {:noreply, assign(socket, show_demo: !socket.assigns.show_demo)}
+    {:noreply, update(socket, :show_demo, &not/1)}
   end
 
   @impl true
   def handle_event("demo_basic", _params, socket) do
-    # Subscribe first
-    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+    # Subscribe if not already subscribed
+    socket = maybe_subscribe(socket, "demo")
 
     # Send first message to create the queue (synchronous - queue will be ready)
     Producer.publish(
@@ -282,26 +289,25 @@ defmodule MailroomWeb.QueueLive.Index do
 
     # Send remaining messages in background
     Task.start(fn ->
-      for i <- 2..5 do
+      Enum.each(2..5, fn i ->
         Producer.publish(
           queue_name: "demo",
           payload: %{"task" => "Task ##{i}", "process_time_ms" => 1000}
         )
         Process.sleep(300)
-      end
+      end)
     end)
 
     {:noreply,
      socket
-     |> assign(queues: queues)
-     |> assign(stats_dirty: true)
+     |> assign(queues: queues, stats_dirty: true)
      |> put_flash(:info, "Demo: Sending 5 messages...")}
   end
 
   @impl true
   def handle_event("demo_parallel_groups", _params, socket) do
-    # Subscribe first
-    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+    # Subscribe if not already subscribed
+    socket = maybe_subscribe(socket, "demo")
 
     # Pre-create the queues (synchronous - queues will be ready)
     groups = ["alice", "bob", "charlie"]
@@ -318,7 +324,7 @@ defmodule MailroomWeb.QueueLive.Index do
 
     # Now send the real messages in background
     Task.start(fn ->
-      for i <- 1..6 do
+      Enum.each(1..6, fn i ->
         group = Enum.at(groups, rem(i - 1, 3))
         Producer.publish(
           queue_name: "demo",
@@ -326,36 +332,35 @@ defmodule MailroomWeb.QueueLive.Index do
           group_id: group
         )
         Process.sleep(200)
-      end
+      end)
     end)
 
     {:noreply,
      socket
-     |> assign(queues: queues)
-     |> assign(stats_dirty: true)
+     |> assign(queues: queues, stats_dirty: true)
      |> put_flash(:info, "Demo: 3 groups processing in parallel!")}
   end
 
   @impl true
   def handle_event("demo_burst", _params, socket) do
-    # Subscribe first
-    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+    # Subscribe if not already subscribed
+    socket = maybe_subscribe(socket, "demo")
 
     # Pre-create the 4 groups (synchronous - queues will be ready)
-    for i <- 1..4 do
+    Enum.each(1..4, fn i ->
       Producer.publish(
         queue_name: "demo",
         payload: %{"task" => "Setup group #{i}", "process_time_ms" => 100},
         group_id: "group_#{i}"
       )
-    end
+    end)
 
     # Queues are now ready - refresh immediately
     queues = load_queues()
 
-    # Now send the burst in background
+    # Now send the burst in background (8 more messages, 12 total with setup)
     Task.start(fn ->
-      for i <- 1..12 do
+      Enum.each(1..8, fn i ->
         group = "group_#{rem(i - 1, 4) + 1}"
         Producer.publish(
           queue_name: "demo",
@@ -363,20 +368,19 @@ defmodule MailroomWeb.QueueLive.Index do
           group_id: group
         )
         Process.sleep(100)
-      end
+      end)
     end)
 
     {:noreply,
      socket
-     |> assign(queues: queues)
-     |> assign(stats_dirty: true)
+     |> assign(queues: queues, stats_dirty: true)
      |> put_flash(:info, "Demo: Burst of 12 messages across 4 groups!")}
   end
 
   @impl true
   def handle_event("demo_fifo", _params, socket) do
-    # Subscribe first
-    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:demo")
+    # Subscribe if not already subscribed
+    socket = maybe_subscribe(socket, "demo")
 
     # Pre-create the group (synchronous - queue will be ready)
     Producer.publish(
@@ -388,27 +392,31 @@ defmodule MailroomWeb.QueueLive.Index do
     # Queue is now ready - refresh immediately
     queues = load_queues()
 
-    # Send numbered messages to same group in background
+    # Send numbered messages to same group in background (4 more, 5 total with setup)
     Task.start(fn ->
-      for i <- 1..5 do
+      Enum.each(1..4, fn i ->
         Producer.publish(
           queue_name: "demo",
           payload: %{"task" => "Message ##{i} (check logs)", "process_time_ms" => 800},
           group_id: "ordered"
         )
         Process.sleep(100)
-      end
+      end)
     end)
 
     {:noreply,
      socket
-     |> assign(queues: queues)
-     |> assign(stats_dirty: true)
+     |> assign(queues: queues, stats_dirty: true)
      |> put_flash(:info, "Demo: 5 ordered messages - check logs!")}
   end
 
   @impl true
   def handle_event("demo_reset", _params, socket) do
+    # Unsubscribe from all queues
+    Enum.each(socket.assigns.subscribed, fn queue_name ->
+      Phoenix.PubSub.unsubscribe(Mailroom.PubSub, "queue:#{queue_name}")
+    end)
+
     # Stop all queues
     Supervisor.list_queues()
     |> Enum.each(fn queue_name ->
@@ -421,7 +429,7 @@ defmodule MailroomWeb.QueueLive.Index do
 
     {:noreply,
      socket
-     |> assign(queues: [])
+     |> assign(queues: [], subscribed: MapSet.new())
      |> put_flash(:info, "Demo reset complete. All queues cleared.")}
   end
 
@@ -431,18 +439,14 @@ defmodule MailroomWeb.QueueLive.Index do
 
   @impl true
   def handle_event("toggle_form", _params, socket) do
-    {:noreply, assign(socket, show_form: !socket.assigns.show_form)}
+    {:noreply, update(socket, :show_form, &not/1)}
   end
 
   @impl true
   def handle_event("toggle_message_form", %{"queue-name" => queue_name}, socket) do
     new_queue = if socket.assigns.message_form_queue == queue_name, do: nil, else: queue_name
 
-    {:noreply,
-     socket
-     |> assign(message_form_queue: new_queue)
-     |> assign(message_payload: "")
-     |> assign(message_group_id: "")}
+    {:noreply, assign(socket, message_form_queue: new_queue, message_payload: "", message_group_id: "")}
   end
 
   @impl true
@@ -465,23 +469,18 @@ defmodule MailroomWeb.QueueLive.Index do
         {:error, _} -> payload_string
       end
 
-    publish_opts = [queue_name: queue_name, payload: payload]
-
     publish_opts =
-      if group_id != "", do: Keyword.put(publish_opts, :group_id, group_id), else: publish_opts
+      case group_id do
+        "" -> [queue_name: queue_name, payload: payload]
+        id -> [queue_name: queue_name, payload: payload, group_id: id]
+      end
 
-    case Producer.publish(publish_opts) do
-      {:ok, _message} ->
-        {:noreply,
-         socket
-         |> assign(message_form_queue: nil)
-         |> assign(message_payload: "")
-         |> assign(message_group_id: "")
-         |> put_flash(:info, "Message sent to #{queue_name}!")}
+    {:ok, _message} = Producer.publish(publish_opts)
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Failed to send message: #{inspect(reason)}")}
-    end
+    {:noreply,
+     socket
+     |> assign(message_form_queue: nil, message_payload: "", message_group_id: "")
+     |> put_flash(:info, "Message sent to #{queue_name}!")}
   end
 
   @impl true
@@ -495,17 +494,15 @@ defmodule MailroomWeb.QueueLive.Index do
 
     case Supervisor.start_queue(queue_name) do
       {:ok, _pid} ->
-        Mailroom.Queue.StatsAggregator.register_queue(queue_name)
+        StatsAggregator.register_queue(queue_name)
 
         queues = load_queues()
 
-        Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue_name}")
+        socket = maybe_subscribe(socket, queue_name)
 
         {:noreply,
          socket
-         |> assign(queues: queues)
-         |> assign(show_form: false)
-         |> assign(new_queue_name: "")
+         |> assign(queues: queues, show_form: false, new_queue_name: "")
          |> put_flash(:info, "Queue '#{queue_name}' created successfully!")}
 
       {:error, {:already_started, _pid}} ->
@@ -543,30 +540,18 @@ defmodule MailroomWeb.QueueLive.Index do
   @impl true
   def handle_info(:refresh_stats, socket) do
     if socket.assigns.stats_dirty do
-      queues = load_queues()
-      {:noreply, socket |> assign(queues: queues) |> assign(stats_dirty: false)}
+      {:noreply, assign(socket, queues: load_queues(), stats_dirty: false)}
     else
       {:noreply, socket}
     end
   end
 
   @impl true
-  def handle_info({_source, event, queue_or_parent}, socket)
+  def handle_info({_source, event, queue_name}, socket)
       when event in [:stats_updated] or is_atom(event) do
-    parent =
-      case String.split(queue_or_parent, ":", parts: 2) do
-        [parent, _] -> parent
-        [parent] -> parent
-      end
+    # Subscribe to parent queue if we aren't already
+    socket = maybe_subscribe(socket, parent_queue_name(queue_name))
 
-    # Subscribe to this queue if we aren't already
-    Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{parent}")
-
-    # Mark stats as dirty - will be refreshed on next timer tick
-    {:noreply, assign(socket, stats_dirty: true)}
-  end
-
-  def handle_info({Mailroom.Queue.Manager, _event, _queue_name}, socket) do
     # Mark stats as dirty - will be refreshed on next timer tick
     {:noreply, assign(socket, stats_dirty: true)}
   end
@@ -575,12 +560,25 @@ defmodule MailroomWeb.QueueLive.Index do
   # Private Functions
   # ====================
 
+  defp maybe_subscribe(socket, queue_name) do
+    if queue_name in socket.assigns.subscribed do
+      socket
+    else
+      Phoenix.PubSub.subscribe(Mailroom.PubSub, "queue:#{queue_name}")
+      assign(socket, subscribed: MapSet.put(socket.assigns.subscribed, queue_name))
+    end
+  end
+
   defp load_queues do
     parent_queues = StatsAggregator.list_parent_queues()
 
     Enum.map(parent_queues, fn queue_name ->
-      stats = Mailroom.Queue.StatsAggregator.get_stats(queue_name)
+      stats = StatsAggregator.get_stats(queue_name)
       %{name: queue_name, stats: stats}
     end)
+  end
+
+  defp parent_queue_name(queue_name) do
+    queue_name |> String.split(":", parts: 2) |> hd()
   end
 end

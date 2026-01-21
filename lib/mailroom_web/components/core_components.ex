@@ -17,7 +17,7 @@ defmodule MailroomWeb.CoreComponents do
   use Phoenix.Component
 
   alias Phoenix.LiveView.JS
-  import MailroomWeb.Gettext
+  use Gettext, backend: MailroomWeb.Gettext
 
   @doc """
   Renders a modal.
